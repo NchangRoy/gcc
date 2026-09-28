@@ -28,6 +28,7 @@
 
 #define _GNU_SOURCE
 #include "libgomp.h"
+#include "pvsched.h"
 #include "gomp-constants.h"
 #include <limits.h>
 #ifndef LIBGOMP_OFFLOADED_ONLY
@@ -130,6 +131,54 @@ int gomp_reverse_offload_threads = 8;  /* Reasonable default.  */
 
 static int wait_policy = -1;
 static unsigned long stacksize = GOMP_DEFAULT_STACKSIZE;
+int gomp_pv_wait_policy = -1;
+int guest_ivshmem_fd = -1;
+void *guest_ivshmem_h2g;
+struct ivshmem_header *pvsched_ivshmem_header;
+
+/* Parse the GOMP_WAIT_POLICY environment variable.  */
+static bool
+parse_pv_wait_policy (const char *name, int *pvalue)
+{
+  char *env;
+
+  env = getenv (name);
+  if (env == NULL)
+    return false;
+
+  while (isspace ((unsigned char) *env))
+    ++env;
+  if (*env == '\0')
+    goto invalid;
+  if (strncasecmp (env, "pvsched", 7) == 0)
+    {
+      *pvalue = 2;
+      env += 7;
+    }
+  else if (strncasecmp (env, "active", 6) == 0)
+    {
+      *pvalue = 1;
+      env += 6;
+    }
+  else if (strncasecmp (env, "passive", 7) == 0)
+    {
+      *pvalue = 0;
+      env += 7;
+    }
+  else
+    goto invalid;
+
+  while (isspace ((unsigned char) *env))
+    ++env;
+  if (*env != '\0')
+    goto invalid;
+  return true;
+
+ invalid:
+  gomp_error ("Invalid value for environment variable %s", name);
+  *pvalue = -1;
+  return false;
+}
 
 static void
 print_env_var_error (const char *env, const char *val)
@@ -631,7 +680,7 @@ parse_one_place (char **envp, bool *negatep, unsigned long *lenp,
 	return false;
       env = end - 1;
       has_braces = false;
-      if (gomp_places_list
+      if (p
 	  && !gomp_affinity_add_cpus (p, this_num, 1, 1, false))
 	return false;
     }
@@ -1967,6 +2016,8 @@ omp_display_env (int verbose)
       fprintf (stderr, "  [host] GOMP_SPINCOUNT = '%lu'\n",
 	       (unsigned long) gomp_spin_count_var);
 #endif
+      fprintf (stderr, "  [host] GOMP_WAIT_POLICY = '%d'\n",
+	       gomp_pv_wait_policy);
     }
 
   fputs ("OPENMP DISPLAY ENVIRONMENT END\n", stderr);
@@ -2199,6 +2250,47 @@ cleanup_env (void)
     }
 }
 
+
+static int
+gomp_pvsched_init (void)
+{
+  void *base;
+  struct ivshmem_header *header;
+
+  guest_ivshmem_fd = open ("/dev/guest_ivshmem", O_RDONLY);
+  if (guest_ivshmem_fd < 0)
+    {
+      gomp_error ("failed to open /dev/guest_ivshmem: %s; falling back to "
+		  "the default OMP_WAIT_POLICY", strerror (errno));
+      return -1;
+    }
+
+  header = (struct ivshmem_header *) mmap (NULL, sizeof (struct ivshmem_header),
+		      PROT_READ, MAP_SHARED, guest_ivshmem_fd, 0);
+  if (header == MAP_FAILED)
+    {
+      gomp_error ("failed to read ivshmem header: %s; falling back to "
+		  "the default OMP_WAIT_POLICY", strerror (errno));
+      close (guest_ivshmem_fd);
+      guest_ivshmem_fd = -1;
+      return -1;
+    }
+  base = mmap (NULL, header->h2g_page_size, PROT_READ,
+		      MAP_SHARED, guest_ivshmem_fd, header->h2g_page_offset);
+  if (base == MAP_FAILED)
+    {
+      gomp_error ("failed to map guest_ivshmem H2G pages: %s; "
+		  "falling back to the default OMP_WAIT_POLICY", strerror (errno));
+      munmap (header, sizeof (struct ivshmem_header));
+      close (guest_ivshmem_fd);
+      guest_ivshmem_fd = -1;
+      return -1;
+    }
+  pvsched_ivshmem_header = header;
+  guest_ivshmem_h2g = base;
+  return 0;
+}
+
 static void __attribute__((constructor))
 initialize_env (void)
 {
@@ -2210,6 +2302,7 @@ initialize_env (void)
   uint32_t *flag_var_addr = NULL;
   unsigned pos;
   struct gomp_icv_list *all, *none;
+  int gomp_wait_policy_init = 0;
 
   /* Do a compile time check that mkomp_h.pl did good job.  */
   omp_check_defines ();
@@ -2422,12 +2515,19 @@ initialize_env (void)
     wait_policy = none->icvs.wait_policy;
   else if (all != NULL && gomp_get_icv_flag (all->flags, GOMP_ICV_WAIT_POLICY))
     wait_policy = all->icvs.wait_policy;
+  
+  if(!parse_pv_wait_policy("GOMP_WAIT_POLICY", &gomp_pv_wait_policy))
+    gomp_pv_wait_policy = -1;
+
+  if (gomp_pv_wait_policy == 2)
+    gomp_wait_policy_init = gomp_pvsched_init ();
+
 
   if (!parse_spincount ("GOMP_SPINCOUNT", &gomp_spin_count_var))
     {
       /* Using a rough estimation of 100000 spins per msec,
-	 use 5 min blocking for OMP_WAIT_POLICY=active,
-	 3 msec blocking when OMP_WAIT_POLICY is not specificed
+	 use 5 min blocking for OMP_WAIT_POLICY=active or GOMP_WAIT_POLICY=active,
+	 3 msec blocking when OMP_WAIT_POLICY is not specified
 	 and 0 when OMP_WAIT_POLICY=passive.
 	 Depending on the CPU speed, this can be e.g. 5 times longer
 	 or 5 times shorter.  */
@@ -2445,6 +2545,42 @@ initialize_env (void)
     gomp_throttled_spin_count_var = 1000LL;
   else if (wait_policy < 0)
     gomp_throttled_spin_count_var = 100LL;
+
+  if (gomp_pv_wait_policy >= 0 && wait_policy >= 0
+      && gomp_pv_wait_policy != wait_policy)
+    {
+      gomp_error ("Conflicting OMP_WAIT_POLICY and GOMP_WAIT_POLICY; "
+		  "Prioritizing OMP_WAIT_POLICY");
+      gomp_pv_wait_policy = -1;
+    }
+
+  if (gomp_pv_wait_policy == 2)
+    {
+      if (gomp_wait_policy_init < 0)
+	{
+	  gomp_error ("Error initializing pvsched; falling back to default OMP_WAIT_POLICY");
+	  gomp_pv_wait_policy = -1;
+	  gomp_spin_count_var = 300000LL;
+	  gomp_throttled_spin_count_var = 100LL;
+	}
+      else
+	{
+	  gomp_spin_count_var = 30000000000LL;
+	  gomp_throttled_spin_count_var = 1000LL;
+	}
+    }
+  else if (gomp_pv_wait_policy == 1)
+    {
+      gomp_spin_count_var = 30000000000LL;
+      gomp_throttled_spin_count_var = 1000LL;
+    }
+  else if (gomp_pv_wait_policy == 0)
+    gomp_spin_count_var = 0;
+  else if (gomp_pv_wait_policy < 0)
+    {
+      gomp_throttled_spin_count_var = 100LL;
+      gomp_spin_count_var = 300000LL;
+    }
   if (gomp_throttled_spin_count_var > gomp_spin_count_var)
     gomp_throttled_spin_count_var = gomp_spin_count_var;
 
@@ -2508,4 +2644,5 @@ initialize_env (void)
 
   goacc_profiling_initialize ();
 }
+
 #endif /* LIBGOMP_OFFLOADED_ONLY */

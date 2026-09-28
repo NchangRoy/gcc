@@ -27,9 +27,11 @@
    creation and termination.  */
 
 #include "libgomp.h"
+#include "pvsched.h"
 #include "pool.h"
 #include <stdlib.h>
 #include <string.h>
+
 
 #ifdef LIBGOMP_USE_PTHREADS
 pthread_attr_t gomp_thread_attr;
@@ -69,6 +71,8 @@ struct gomp_thread_start_data
 static void *
 gomp_thread_start (void *xdata)
 {
+  /* USDT probe for pv-barrier-sync to trace worker thread creation.  */
+  DTRACE_PROBE1 (gomp, gomp_thread_start, NULL);
   struct gomp_thread_start_data *data = xdata;
   struct gomp_thread *thr;
   struct gomp_thread_pool *pool;

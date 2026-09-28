@@ -31,6 +31,7 @@
 #define GOMP_WAIT_H 1
 
 #include "libgomp.h"
+#include "pvsched.h"
 #include <errno.h>
 
 #define FUTEX_WAIT	0
@@ -61,9 +62,39 @@ static inline int do_spin (int *addr, int val)
   return 1;
 }
 
+static inline int
+pv_spin (int *addr, int val)
+{
+  unsigned long long i, count = gomp_spin_count_var;
+  pvsched_u64 phantom_average;
+
+  if (__builtin_expect (__atomic_load_n (&gomp_managed_threads,
+                                         MEMMODEL_RELAXED)
+                        > gomp_available_cpus, 0))
+    count = gomp_throttled_spin_count_var;
+  for (i = 0; i < count; i++)
+    if (__builtin_expect (__atomic_load_n (addr, MEMMODEL_RELAXED) != val, 0))
+      return 0;
+    else
+      {
+	if (read_latest_phantom_average (&phantom_average) == 0
+	    && phantom_average > 0)
+	  return 1;
+	cpu_relax ();
+      }
+  return 1;
+}
+
 static inline void do_wait (int *addr, int val)
 {
-  if (do_spin (addr, val))
+  DTRACE_PROBE1 (gomp, do_wait, NULL);
+  int res;
+
+  if (gomp_pv_wait_policy == 2)
+    res = pv_spin (addr, val);
+  else
+    res = do_spin (addr, val);
+  if (res)
     futex_wait (addr, val);
 }
 
@@ -71,4 +102,4 @@ static inline void do_wait (int *addr, int val)
 # pragma GCC visibility pop
 #endif
 
-#endif /* GOMP_WAIT_H */
+#endif /* GOMP_WAIT_H */  

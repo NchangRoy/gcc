@@ -621,6 +621,7 @@ extern int goacc_device_num;
 extern char *goacc_device_type;
 extern int goacc_default_dims[GOMP_DIM_MAX];
 extern int gomp_reverse_offload_threads;
+extern int gomp_pv_wait_policy;
 
 enum gomp_task_kind
 {
