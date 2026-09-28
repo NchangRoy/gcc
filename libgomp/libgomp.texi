@@ -4016,6 +4016,7 @@ variable is not set.
 * GOMP_DEBUG::              Enable debugging output
 * GOMP_STACKSIZE::          Set default thread stack size
 * GOMP_SPINCOUNT::          Set the busy-wait spin count
+* GOMP_WAIT_POLICY::        Select the phantom-guided wait policy
 * GOMP_RTEMS_THREAD_POOLS:: Set the RTEMS specific thread pools
 * GOMP_REVERSE_OFFLOAD_THREADS:: Set the maximum number of host threads
 @end menu
@@ -4690,7 +4691,50 @@ undefined, respectively; unless the @env{GOMP_SPINCOUNT} is lower
 or @env{OMP_WAIT_POLICY} is @code{PASSIVE}.
 
 @item @emph{See also}:
-@ref{OMP_WAIT_POLICY}
+@ref{OMP_WAIT_POLICY}, @ref{GOMP_WAIT_POLICY}
+@end table
+
+
+
+@node GOMP_WAIT_POLICY
+@section @env{GOMP_WAIT_POLICY} -- Select the phantom-guided wait policy
+@cindex Environment Variable
+@cindex Implementation specific setting
+@table @asis
+@item @emph{Description}:
+GCC-specific extension of the OpenMP @env{OMP_WAIT_POLICY} ICV.
+libgomp's default spin/block behavior at barriers.
+
+When set to @code{PVSCHED}, @env{GOMP_WAIT_POLICY} enables
+@code{pv-barrier-sync}, a paravirtualized barrier synchronization
+policy: it overrides the normal fixed spin/block behavior so that a
+thread spins at every barrier and, on every spin iteration, checks a
+host-provided metric called @code{phantom_average} (a time-weighted
+average of how many of the guest's vCPUs were not actually running on
+a host pCPU during the last scheduler tick, published over shared
+memory via @code{/dev/guest_ivshmem}).  As long as @code{phantom_average}
+is zero, the thread continues spinning, maximizing spinning during
+non-contended phases on the host to achieve faster synchronization at
+barriers.  As soon as @code{phantom_average} becomes positive, indicating
+host-side vCPU contention, the thread blocks immediately instead of
+continuing to spin.  Checking @code{phantom_average} is a plain
+shared-memory read, so it adds negligible overhead per iteration.  If the
+shared-memory channel cannot be established (device unavailable), a warning is
+printed and libgomp falls back to the default @env{OMP_WAIT_POLICY}.
+
+@code{ACTIVE} and @code{PASSIVE} behave the same as the corresponding
+@env{OMP_WAIT_POLICY} values.  Setting @env{OMP_WAIT_POLICY} and
+@env{GOMP_WAIT_POLICY} to conflicting values (one @code{ACTIVE} and
+the other @code{PASSIVE}) is an error; in case of such errors or
+initialization failures, execution safely falls back to the default @env{OMP_WAIT_POLICY}.
+
+@item @emph{See also}:
+@ref{OMP_WAIT_POLICY}, @ref{GOMP_SPINCOUNT}
+
+@item @emph{Reference}:
+Himadri Chhaya-Shailesh,
+@uref{https://inria.hal.science/tel-05438117v2, Scheduler Guided OpenMP
+Execution in Cloud VMs} (PhD thesis)
 @end table
 
 

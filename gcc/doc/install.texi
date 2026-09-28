@@ -491,6 +491,15 @@ Necessary to build GCC with zstd compression used for LTO bytecode.
 The library is searched in your default library patch search.
 Alternatively, the @option{--with-zstd} configure option should be used.
 
+@item SystemTap SDT headers (@file{sys/sdt.h}), packaged as
+@samp{systemtap-sdt-dev} on Debian/Ubuntu or @samp{systemtap-sdt-devel}
+on Fedora/RHEL.
+
+Necessary to build libgomp's Userspace Statically Defined Tracing
+(USDT) probes, used by Phantom Tracker and other eBPF-based tooling to
+observe libgomp's OpenMP thread lifecycle and the pv-barrier-sync wait
+policy without relying on non-exported internal symbols.
+
 @item Python3 modules
 
 The complete list of Python3 modules broken down by GCC subcomponent
