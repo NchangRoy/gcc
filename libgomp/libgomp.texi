@@ -4017,6 +4017,7 @@ variable is not set.
 * GOMP_STACKSIZE::          Set default thread stack size
 * GOMP_SPINCOUNT::          Set the busy-wait spin count
 * GOMP_WAIT_POLICY::        Select the phantom-guided wait policy
+* GOMP_DYNAMIC_POLICY::         Select the phantom-guided degree-of-parallelism policy
 * GOMP_RTEMS_THREAD_POOLS:: Set the RTEMS specific thread pools
 * GOMP_REVERSE_OFFLOAD_THREADS:: Set the maximum number of host threads
 @end menu
@@ -4231,9 +4232,9 @@ within a team.  The value of this environment variable shall be
 disabled by default.
 
 @item @emph{See also}:
-@ref{omp_set_dynamic}
+@ref{omp_set_dynamic}, @ref{GOMP_DYNAMIC_POLICY}
 
-@item @emph{Reference}: 
+@item @emph{Reference}:
 @uref{https://www.openmp.org, OpenMP specification v4.5}, Section 4.3
 @end table
 
@@ -4730,6 +4731,45 @@ initialization failures, execution safely falls back to the default @env{OMP_WAI
 
 @item @emph{See also}:
 @ref{OMP_WAIT_POLICY}, @ref{GOMP_SPINCOUNT}
+
+@item @emph{Reference}:
+Himadri Chhaya-Shailesh,
+@uref{https://inria.hal.science/tel-05438117v2, Scheduler Guided OpenMP
+Execution in Cloud VMs} (PhD thesis)
+@end table
+
+
+
+@node GOMP_DYNAMIC_POLICY
+@section @env{GOMP_DYNAMIC_POLICY} -- Select the phantom-guided degree-of-parallelism policy
+@cindex Environment Variable
+@cindex Implementation specific setting
+@table @asis
+@item @emph{Description}:
+GCC-specific extension controlling the degree of parallelism (DoP) that
+libgomp's @code{gomp_dynamic_max_threads} resolves for a parallel
+region when @env{OMP_DYNAMIC} is enabled.
+
+When set to @code{PVSCHED}, @env{GOMP_DYNAMIC_POLICY} enables the
+Juunansei degree-of-parallelism algorithm, which replaces the default
+online-CPU-count-minus-loadavg heuristic with a decision driven by the
+same host-provided @code{phantom_average} metric used by
+@ref{GOMP_WAIT_POLICY}, together with a derived @code{idle_average}
+metric, both published over shared memory via
+@code{/dev/guest_ivshmem}.  When @code{phantom_average} is positive,
+Juunansei lowers the DoP by the number of phantoms detected; when no
+phantoms are reported, it holds the DoP steady and considers raising
+it by the minimum @code{idle_average} observed over a short, adaptive
+stability window of consecutive scheduler ticks.  If the shared-memory
+channel cannot be established, or a watermark read fails, libgomp
+silently and permanently falls back to the default heuristic for the
+remainder of the run.
+
+When set to @code{DEFAULT}, or left undefined, libgomp uses the
+default online-CPU-count-minus-loadavg heuristic.
+
+@item @emph{See also}:
+@ref{OMP_DYNAMIC}, @ref{GOMP_WAIT_POLICY}
 
 @item @emph{Reference}:
 Himadri Chhaya-Shailesh,
