@@ -135,6 +135,7 @@ int gomp_pv_wait_policy = -1;
 int guest_ivshmem_fd = -1;
 void *guest_ivshmem_h2g;
 struct ivshmem_header *pvsched_ivshmem_header;
+int gomp_dynamic_policy = -1;
 
 /* Parse the GOMP_WAIT_POLICY environment variable.  */
 static bool
@@ -161,6 +162,45 @@ parse_pv_wait_policy (const char *name, int *pvalue)
       env += 6;
     }
   else if (strncasecmp (env, "passive", 7) == 0)
+    {
+      *pvalue = 0;
+      env += 7;
+    }
+  else
+    goto invalid;
+
+  while (isspace ((unsigned char) *env))
+    ++env;
+  if (*env != '\0')
+    goto invalid;
+  return true;
+
+ invalid:
+  gomp_error ("Invalid value for environment variable %s", name);
+  *pvalue = -1;
+  return false;
+}
+
+/* Parse the GOMP_DYNAMIC_POLICY environment variable.  */
+static bool
+parse_dynamic_policy (const char *name, int *pvalue)
+{
+  char *env;
+
+  env = getenv (name);
+  if (env == NULL)
+    return false;
+
+  while (isspace ((unsigned char) *env))
+    ++env;
+  if (*env == '\0')
+    goto invalid;
+  if (strncasecmp (env, "pvsched", 7) == 0)
+    {
+      *pvalue = 1;
+      env += 7;
+    }
+  else if (strncasecmp (env, "default", 7) == 0)
     {
       *pvalue = 0;
       env += 7;
@@ -2261,7 +2301,8 @@ gomp_pvsched_init (void)
   if (guest_ivshmem_fd < 0)
     {
       gomp_error ("failed to open /dev/guest_ivshmem: %s; falling back to "
-		  "the default OMP_WAIT_POLICY", strerror (errno));
+		  "the default OMP_WAIT_POLICY/OMP_DYNAMIC heuristics",
+		  strerror (errno));
       return -1;
     }
 
@@ -2270,7 +2311,8 @@ gomp_pvsched_init (void)
   if (header == MAP_FAILED)
     {
       gomp_error ("failed to read ivshmem header: %s; falling back to "
-		  "the default OMP_WAIT_POLICY", strerror (errno));
+		  "the default OMP_WAIT_POLICY/OMP_DYNAMIC heuristics",
+		  strerror (errno));
       close (guest_ivshmem_fd);
       guest_ivshmem_fd = -1;
       return -1;
@@ -2279,8 +2321,9 @@ gomp_pvsched_init (void)
 		      MAP_SHARED, guest_ivshmem_fd, header->h2g_page_offset);
   if (base == MAP_FAILED)
     {
-      gomp_error ("failed to map guest_ivshmem H2G pages: %s; "
-		  "falling back to the default OMP_WAIT_POLICY", strerror (errno));
+      gomp_error ("failed to map guest_ivshmem H2G pages: %s; falling "
+		  "back to the default OMP_WAIT_POLICY/OMP_DYNAMIC "
+		  "heuristics", strerror (errno));
       munmap (header, sizeof (struct ivshmem_header));
       close (guest_ivshmem_fd);
       guest_ivshmem_fd = -1;
@@ -2519,8 +2562,23 @@ initialize_env (void)
   if(!parse_pv_wait_policy("GOMP_WAIT_POLICY", &gomp_pv_wait_policy))
     gomp_pv_wait_policy = -1;
 
-  if (gomp_pv_wait_policy == 2)
+  if (!parse_dynamic_policy ("GOMP_DYNAMIC_POLICY", &gomp_dynamic_policy))
+    gomp_dynamic_policy = -1;
+
+  /* Both GOMP_WAIT_POLICY=pvsched and GOMP_DYNAMIC_POLICY=pvsched read
+     Juunansei's watermarks through the same guest_ivshmem mapping, so
+     either one on its own is enough to bring it up; run the mapping once
+     here rather than tying it to GOMP_WAIT_POLICY alone.  */
+  if (gomp_pv_wait_policy == 2 || gomp_dynamic_policy == 1)
     gomp_wait_policy_init = gomp_pvsched_init ();
+
+  if (gomp_dynamic_policy == 1)
+    {
+      if (gomp_wait_policy_init < 0)
+	gomp_dynamic_policy = 0;
+      else
+	juunansei_initialize ();
+    }
 
 
   if (!parse_spincount ("GOMP_SPINCOUNT", &gomp_spin_count_var))

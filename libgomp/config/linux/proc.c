@@ -31,9 +31,11 @@
 #endif
 #include "libgomp.h"
 #include "proc.h"
+#include "pvsched.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sys/sdt.h>
 #ifdef HAVE_GETLOADAVG
 # ifdef HAVE_SYS_LOADAVG_H
 #  include <sys/loadavg.h>
@@ -185,9 +187,70 @@ get_num_procs (void)
    minus the 15 minute load average.  */
 
 unsigned
+pv_gomp_dynamic_max_threads(void)
+{
+  struct juunansei_context context;
+  struct juunansei_decision *d;
+  struct juunansei_decision decision_snapshot;
+  struct juunansei_status status_snapshot;
+  int ret;
+
+  ret = juunansei_get_latest_context (&context);
+  if (ret < 0)
+    return -1;
+
+  if (first_decision)
+    {
+      d = juunansei_first_decision (&context);
+      status_snapshot = status;
+      DTRACE_PROBE3 (gomp, dop_decision, d, &status_snapshot, &context);
+      return (unsigned) d->curr_dop;
+    }
+
+  if (decision.timestamp <= timestamps.last_decision)
+    {
+      unsigned same_tick_dop = (unsigned) juunansei_same_tick_decision ();
+      decision_snapshot = decision;
+      status_snapshot = status;
+      DTRACE_PROBE3 (gomp, dop_decision, &decision_snapshot, &status_snapshot, &context);
+      return same_tick_dop;
+    }
+
+  decision.active_dop = juunansei_active_dop_resolution ();
+  decision.curr_dop = juunansei_curr_dop_resolution (&context);
+
+  update_juunansei ();
+
+  decision_snapshot = decision;
+  status_snapshot = status;
+  DTRACE_PROBE3 (gomp, dop_decision, &decision_snapshot, &status_snapshot, &context);
+
+  return (unsigned) decision.curr_dop;
+}
+
+unsigned
 gomp_dynamic_max_threads (void)
 {
+  int dop_res;
   unsigned n_onln, loadavg, nthreads_var = gomp_icv (false)->nthreads_var;
+  unsigned result;
+
+  if ( gomp_dynamic_policy == 1)
+    {
+      dop_res = pv_gomp_dynamic_max_threads();
+      if(dop_res < 0)
+        {
+          gomp_debug (0, "pvsched: pv_gomp_dynamic_max_threads failed "
+		      "(dop_res=%d), falling back to default heuristic\n",
+		      dop_res);
+          juunanei_cleanup();
+        }
+      else
+        {
+          DTRACE_PROBE1 (gomp, dyn_max_threads, dop_res);
+          return dop_res;
+        }
+    }
 
   n_onln = get_num_procs ();
   if (n_onln > nthreads_var)
@@ -206,9 +269,12 @@ gomp_dynamic_max_threads (void)
 #endif
 
   if (loadavg >= n_onln)
-    return 1;
+    result = 1;
   else
-    return n_onln - loadavg;
+    result = n_onln - loadavg;
+
+  DTRACE_PROBE1 (gomp, dyn_max_threads, result);
+  return result;
 }
 
 int

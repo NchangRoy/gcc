@@ -67,15 +67,136 @@ extern int guest_ivshmem_fd;
 extern void *guest_ivshmem_h2g;
 extern struct ivshmem_header *pvsched_ivshmem_header;
 
+#define WAKE_CONTEXT 0
+#define WAIT_CONTEXT 1
+
+struct juunansei_knobs {
+  unsigned long long consuming_idle : 1;
+  unsigned long long : 63;
+  uint8_t global_phantoms_detected;
+  uint8_t global_phantoms_increasing;
+  uint8_t _rsvd0[6];
+  int64_t stability_requirement;
+  uint8_t _pad[40];
+} __attribute__((aligned(64)));
+
+struct juunansei_decision {
+  uint64_t host_watermark;
+  uint64_t timestamp;
+  int32_t phantom_average;
+  int32_t decision_nr;
+  int32_t curr_dop;
+  int32_t prev_dop;
+  int32_t active_dop;
+  uint8_t padding[28];
+} __attribute__((packed, aligned(64)));
+
+
+struct juunansei_context {
+   int32_t phantom_average;
+   int32_t idle_average;
+   int32_t min_idle_average;
+   uint8_t padding[52];
+} __attribute__ ((aligned(64)));
+
+struct juunansei_timestamps {
+  uint64_t last_decision;
+  uint8_t padding[56];
+} __attribute__((packed, aligned(64)));
+
+struct juunansei_status {
+  uint64_t watermark_used_at_decision;
+  int64_t total_vcpus;
+  int64_t active_dop;
+  int64_t prev_dop;
+  int64_t curr_dop;
+  int64_t decision_count;
+  int64_t dop_before_idle_consumption;
+  uint64_t padding;
+} __attribute__((packed, aligned(64)));
+
+extern struct juunansei_knobs juunansei_knobs;
+extern int first_decision;
+extern struct juunansei_decision decision;
+extern struct juunansei_status status;
+extern struct juunansei_timestamps timestamps;
+
+extern void juunansei_initialize (void);
+
+extern struct juunansei_decision *
+juunansei_first_decision (struct juunansei_context *context);
+
+extern void update_juunansei ();
+
+extern int juunansei_active_dop_resolution (void);
+
+extern int juunansei_curr_dop_resolution (struct juunansei_context *context);
+
+extern int juunansei_get_latest_context (struct juunansei_context *ctxt);
+
+extern int juunansei_same_tick_decision (void);
+
+extern void juunanei_cleanup (void);
+
 static inline int
 read_latest_phantom_average (pvsched_u64 *avg)
 {
+  pvsched_u64 watermark;
   if (guest_ivshmem_h2g == NULL)
     return -ENODEV;
-  *avg = __atomic_load_n (&((struct hg_message *) guest_ivshmem_h2g)[pvsched_ivshmem_header->latest_slot].msg,
-			   MEMMODEL_RELAXED);
+  watermark = __atomic_load_n (&((struct hg_message *) guest_ivshmem_h2g)[pvsched_ivshmem_header->latest_slot].msg,
+				MEMMODEL_RELAXED);
+  *avg = (watermark >> 16) & 0xffff;
   DTRACE_PROBE1 (gomp, phantom_average, *avg);
   return 0;
+}
+
+static inline int
+read_watermark_at_slot (uint32_t slot, pvsched_u64 * msg)
+{
+  if (guest_ivshmem_h2g == NULL)
+    return -ENODEV;
+  *msg = __atomic_load_n (&((struct hg_message *) guest_ivshmem_h2g)[slot].msg,
+				MEMMODEL_RELAXED);
+  return 0;
+}
+
+static inline int
+read_n_lastest_watermarks (uint32_t n, pvsched_u64 *msgs)
+{
+  uint32_t nr_slots, latest_slot_pos_in_his, best_ts, slot, i;
+  pvsched_u64 watermark;
+
+  if (guest_ivshmem_h2g == NULL)
+    return -ENODEV;
+
+  nr_slots = pvsched_ivshmem_header->h2g_page_size / sizeof (struct hg_message);
+  read_watermark_at_slot (pvsched_ivshmem_header->latest_slot, &watermark);
+  latest_slot_pos_in_his = 1;
+  best_ts = (uint32_t) (watermark >> 32);
+
+  for (slot = 1; slot < nr_slots; slot++)
+    {
+      uint32_t ts;
+
+      read_watermark_at_slot (slot, &watermark);
+      ts = (uint32_t) (watermark >> 32);
+
+      if (ts == best_ts)
+        {
+          latest_slot_pos_in_his = slot;
+          break;
+        }
+    }
+
+  slot = latest_slot_pos_in_his;
+  for (i = 0; i < n; i++)
+    {
+      read_watermark_at_slot (slot, &msgs[i]);
+      slot = (slot == 1) ? nr_slots - 1 : slot - 1;
+    }
+
+  return (int) n;
 }
 
 #endif
